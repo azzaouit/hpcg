@@ -22,7 +22,9 @@
 #define SPARSEMATRIX_HPP
 
 #include <vector>
+#include <set>
 #include <cassert>
+#include <random>
 #include "Geometry.hpp"
 #include "Vector.hpp"
 #include "MGData.hpp"
@@ -73,6 +75,37 @@ struct SparseMatrix_STRUCT {
   local_int_t * sendLength; //!< lenghts of messages sent to neighboring processes
   double * sendBuffer; //!< send buffer for non-blocking sends
 #endif
+/*!
+  Injects the matrix values structure with Gaussian noise
+
+  @param[in] err_rate Standard deviation of the Gaussian sampler.
+  @param[in] inj_rate Injection rate (percentage of entries to modify)
+ */
+  void inject_errors(double err_rate, double inj_rate){
+      std::random_device rand_dev;
+      std::mt19937 gen(rand_dev());
+      int n = (double)localNumberOfNonzeros*inj_rate;
+
+      std::uniform_int_distribution<int> row_dist(0, localNumberOfRows-1);
+
+      std::vector<std::set<int>> e(localNumberOfRows);
+      for(int i = 0; i < n; ++i){
+          int r = row_dist(gen);
+          std::uniform_int_distribution<int> col_dist(0, nonzerosInRow[r]-1);
+          int c = 0;
+          do{
+              c = col_dist(gen);
+          }while(e[r].count(c) > 0);
+          e[r].insert(c);
+      }
+
+      for(int i = 0; i < localNumberOfRows; ++i)
+          for(auto j: e[i]){
+              double val = matrixValues[i][j];
+              std::normal_distribution<double> g(0, err_rate);
+              matrixValues[i][j] += g(gen);
+          }
+  }
 };
 typedef struct SparseMatrix_STRUCT SparseMatrix;
 

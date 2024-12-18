@@ -34,6 +34,7 @@ using std::cin;
 using std::endl;
 
 #include <vector>
+#include <pmu/skylake.h>
 
 #include "hpcg.hpp"
 
@@ -78,7 +79,23 @@ int main(int argc, char * argv[]) {
 
   HPCG_Params params;
 
+  int ret;
+  char buf[1024];
+  uint64_t cntrs[7];
+  struct pmu_ctx p;
+  double err_rate = 0.01, inj_rate = 0.01;
+  if ((ret = pmu_init(&p)))
+    return ret;
+
   HPCG_Init(&argc, &argv, params);
+
+  char *err_rate_str = getenv("HPCG_ERR_RATE");
+  if(err_rate_str)
+      err_rate = atof(err_rate_str);
+
+  char *inj_rate_str = getenv("HPCG_INJ_RATE");
+  if(inj_rate_str)
+      inj_rate = atof(inj_rate_str);
 
   // Check if QuickPath option is enabled.
   // If the running time is set to zero, we minimize all paths through the program
@@ -135,6 +152,7 @@ int main(int argc, char * argv[]) {
 
   Vector b, x, xexact;
   GenerateProblem(A, &b, &x, &xexact);
+
   SetupHalo(A);
   int numberOfMgLevels = 4; // Number of levels including first
   SparseMatrix * curLevelMatrix = &A;
@@ -162,7 +180,8 @@ int main(int argc, char * argv[]) {
   CGData data;
   InitializeSparseCGData(A, data);
 
-
+  // Error injection
+  A.inject_errors(err_rate, inj_rate);
 
   ////////////////////////////////////
   // Reference SpMV+MG Timing Phase //
@@ -186,10 +205,17 @@ int main(int argc, char * argv[]) {
   if (quickPath) numberOfCalls = 1; //QuickPath means we do on one call of each block of repetitive code
   double t_begin = mytimer();
   for (int i=0; i< numberOfCalls; ++i) {
-    ierr = ComputeSPMV_ref(A, x_overlap, b_computed); // b_computed = A*x_overlap
-    if (ierr) HPCG_fout << "Error in call to SpMV: " << ierr << ".\n" << endl;
-    ierr = ComputeMG_ref(A, b_computed, x_overlap); // b_computed = Minv*y_overlap
-    if (ierr) HPCG_fout << "Error in call to MG: " << ierr << ".\n" << endl;
+#ifndef HPCG_TRACE_UNCORE
+    sprintf(buf, "spv_ref_core_%d_%.2f_%.2f.txt", i, err_rate, inj_rate);
+    TRACE_ALL_CORE(buf, &p, ComputeSPMV_ref, A, x_overlap, b_computed);
+    sprintf(buf, "mg_ref_core_%d_%.2f_%.2f.txt", i, err_rate, inj_rate);
+    TRACE_ALL_CORE(buf, &p, ComputeMG_ref, A, b_computed, x_overlap); // b_computed = Minv*y_overlap
+#else
+    sprintf(buf, "spv_ref_uncore_%d_%.2f_%.2f.txt", i, err_rate, inj_rate);
+    TRACE_ALL_UNCORE(buf, &p, ComputeSPMV_ref, A, x_overlap, b_computed);
+    sprintf(buf, "mg_ref_uncore_%d_%.2f_%.2f.txt", i, err_rate, inj_rate);
+    TRACE_ALL_UNCORE(buf, &p, ComputeMG_ref, A, b_computed, x_overlap); // b_computed = Minv*y_overlap
+#endif
   }
   times[8] = (mytimer() - t_begin)/((double) numberOfCalls);  // Total time divided by number of calls.
 #ifdef HPCG_DEBUG
@@ -218,8 +244,13 @@ int main(int argc, char * argv[]) {
   int err_count = 0;
   for (int i=0; i< numberOfCalls; ++i) {
     ZeroVector(x);
-    ierr = CG_ref( A, data, b, x, refMaxIters, tolerance, niters, normr, normr0, &ref_times[0], true);
-    if (ierr) ++err_count; // count the number of errors in CG
+#ifndef HPCG_TRACE_UNCORE
+    sprintf(buf, "cg_ref_core_%d_%.2f_%.2f.txt", i, err_rate, inj_rate);
+    TRACE_ALL_CORE(buf, &p, CG_ref, A, data, b, x, refMaxIters, tolerance, niters, normr, normr0, &ref_times[0], true);
+#else
+    sprintf(buf, "cg_ref_uncore_%d_%.2f_%.2f.txt", i, err_rate, inj_rate);
+    TRACE_ALL_CORE(buf, &p, CG_ref, A, data, b, x, refMaxIters, tolerance, niters, normr, normr0, &ref_times[0], true);
+#endif
     totalNiters_ref += niters;
   }
   if (rank == 0 && err_count) HPCG_fout << err_count << " error(s) in call(s) to reference CG." << endl;
@@ -281,10 +312,14 @@ int main(int argc, char * argv[]) {
   for (int i=0; i< numberOfCalls; ++i) {
     ZeroVector(x); // start x at all zeros
     double last_cummulative_time = opt_times[0];
-    ierr = CG( A, data, b, x, optMaxIters, refTolerance, niters, normr, normr0, &opt_times[0], true);
-    if (ierr) ++err_count; // count the number of errors in CG
+#ifndef HPCG_TRACE_UNCORE
+    sprintf(buf, "cg_core_%d_%.2f_%.2f.txt", i, err_rate, inj_rate);
+    TRACE_ALL_CORE(buf, &p, CG, A, data, b, x, optMaxIters, refTolerance, niters, normr, normr0, &opt_times[0], true);
+#else
+    sprintf(buf, "cg_uncore_%d_%.2f_%.2f.txt", i, err_rate, inj_rate);
+    TRACE_ALL_UNCORE(buf, &p, CG, A, data, b, x, optMaxIters, refTolerance, niters, normr, normr0, &opt_times[0], true);
+#endif
     if (normr / normr0 > refTolerance) ++tolerance_failures; // the number of failures to reduce residual
-
     // pick the largest number of iterations to guarantee convergence
     if (niters > optNiters) optNiters = niters;
 
@@ -333,8 +368,13 @@ int main(int argc, char * argv[]) {
 
   for (int i=0; i< numberOfCgSets; ++i) {
     ZeroVector(x); // Zero out x
-    ierr = CG( A, data, b, x, optMaxIters, optTolerance, niters, normr, normr0, &times[0], true);
-    if (ierr) HPCG_fout << "Error in call to CG: " << ierr << ".\n" << endl;
+#ifndef HPCG_TRACE_UNCORE
+    sprintf(buf, "cg_timed_core_%d_%.2f_%.2f.txt", i, err_rate, inj_rate);
+    TRACE_ALL_CORE(buf, &p, CG, A, data, b, x, optMaxIters, optTolerance, niters, normr, normr0, &times[0], true);
+#else
+    sprintf(buf, "cg_timed_uncore_%d_%.2f_%.2f.txt", i, err_rate, inj_rate);
+    TRACE_ALL_UNCORE(buf, &p, CG, A, data, b, x, optMaxIters, optTolerance, niters, normr, normr0, &times[0], true);
+#endif
     if (rank==0) HPCG_fout << "Call [" << i << "] Scaled Residual [" << normr/normr0 << "]" << endl;
     testnorms_data.values[i] = normr/normr0; // Record scaled residual from this run
   }
@@ -367,8 +407,6 @@ int main(int argc, char * argv[]) {
   DeleteVector(x_overlap);
   DeleteVector(b_computed);
   delete [] testnorms_data.values;
-
-
 
   HPCG_Finalize();
 

@@ -92,7 +92,7 @@ MPlib        =
 # ----------------------------------------------------------------------
 #
 HPCG_INCLUDES = -I$(INCdir) -I$(INCdir)/$(arch) $(MPinc)
-HPCG_LIBS     =
+HPCG_LIBS     = -lpmu
 #
 # - Compile time options -----------------------------------------------
 #
